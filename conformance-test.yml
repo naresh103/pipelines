@@ -1,0 +1,115 @@
+# conformance-test.yml
+# -----------------------------------------------------------------------------
+# Story 10379 - Module Structure Conformance Test
+#
+# Reusable Azure Pipelines STEP template that checks the structural validity of a
+# Terraform module repository:
+#   * required_providers is declared (and bare `provider "x" {}` config blocks
+#     are absent) in the module root
+#   * CODEOWNERS exists in the module root
+#   * README.md  exists in the module root
+#   * examples/  folder exists
+#
+# This is intentionally a single self-contained bash check so it can be extended
+# with additional conformance rules in future stories as the module repos mature.
+# -----------------------------------------------------------------------------
+
+parameters:
+  # Path to the module root to validate.
+  - name: modulePath
+    type: string
+    default: '$(Build.SourcesDirectory)'
+  # true  -> any failed check fails the pipeline.
+  # false -> checks are reported but the step still succeeds (useful while
+  #          onboarding existing repos that aren't conformant yet).
+  - name: failOnError
+    type: boolean
+    default: true
+  # Require a required_providers block to be present in the module root.
+  - name: requireRequiredProviders
+    type: boolean
+    default: true
+  # Fail if bare `provider "<name>" {}` configuration blocks exist in the module
+  # root (provider configuration should be passed in from the root module).
+  - name: disallowProviderBlocks
+    type: boolean
+    default: true
+
+steps:
+  - bash: |
+      set -uo pipefail
+
+      MODULE_PATH="${{ parameters.modulePath }}"
+      FAIL_ON_ERROR="$(echo "${{ parameters.failOnError }}" | tr 'A-Z' 'a-z')"
+      REQUIRE_RP="$(echo "${{ parameters.requireRequiredProviders }}" | tr 'A-Z' 'a-z')"
+      DISALLOW_PROVIDERS="$(echo "${{ parameters.disallowProviderBlocks }}" | tr 'A-Z' 'a-z')"
+
+      echo "Running module conformance test against: ${MODULE_PATH}"
+      echo "=================================================================="
+
+      errors=0
+      pass() { echo "  [PASS] $1"; }
+      fail() { echo "  [FAIL] $1"; errors=$((errors+1)); }
+
+      # --- CODEOWNERS in module root -----------------------------------------
+      if [[ -f "${MODULE_PATH}/CODEOWNERS" ]]; then
+        pass "CODEOWNERS file exists in module root"
+      else
+        fail "CODEOWNERS file missing from module root"
+      fi
+
+      # --- README.md in module root ------------------------------------------
+      if [[ -f "${MODULE_PATH}/README.md" ]]; then
+        pass "README.md file exists in module root"
+      else
+        fail "README.md file missing from module root"
+      fi
+
+      # --- examples/ folder --------------------------------------------------
+      if [[ -d "${MODULE_PATH}/examples" ]]; then
+        pass "examples/ folder exists"
+      else
+        fail "examples/ folder missing"
+      fi
+
+      # --- required_providers vs provider config blocks ----------------------
+      # Only the module root *.tf files are inspected (not examples/ or nested
+      # submodules), since example/root configs legitimately contain provider
+      # configuration blocks.
+      shopt -s nullglob
+      root_tf=( "${MODULE_PATH}"/*.tf )
+      shopt -u nullglob
+
+      if [[ ${#root_tf[@]} -eq 0 ]]; then
+        fail "No .tf files found in module root"
+      else
+        if [[ "${REQUIRE_RP}" == "true" ]]; then
+          if grep -rqE '^[[:space:]]*required_providers[[:space:]]*\{' "${root_tf[@]}"; then
+            pass "required_providers block is declared"
+          else
+            fail "required_providers block not declared (expected inside a terraform {} block)"
+          fi
+        fi
+
+        if [[ "${DISALLOW_PROVIDERS}" == "true" ]]; then
+          offenders=$(grep -rlE '^[[:space:]]*provider[[:space:]]+"[^"]+"[[:space:]]*\{' "${root_tf[@]}" || true)
+          if [[ -n "${offenders}" ]]; then
+            fail 'provider "<name>" {} configuration block(s) found in module root (pass provider config from the root module instead):'
+            echo "${offenders}" | sed 's/^/           - /'
+          else
+            pass "no provider configuration blocks in module root"
+          fi
+        fi
+      fi
+
+      echo "=================================================================="
+      if [[ ${errors} -gt 0 ]]; then
+        echo "Conformance test found ${errors} issue(s)."
+        if [[ "${FAIL_ON_ERROR}" == "true" ]]; then
+          exit 1
+        fi
+        echo "failOnError=false -> reporting only, not failing the pipeline."
+      else
+        echo "All conformance checks passed."
+      fi
+    displayName: 'Module structure conformance test'

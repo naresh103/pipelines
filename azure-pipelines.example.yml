@@ -1,0 +1,74 @@
+# azure-pipelines.example.yml
+# -----------------------------------------------------------------------------
+# Example that lives in a *module repo's* root and consumes the three common
+# templates from the terraform-modules/pipelines repo.
+#
+# Satisfies Story 10382's validation: the common pipeline is pulled in via a
+# `resources.repositories` reference and `template:` includes. An `extends:`
+# alternative is noted at the bottom.
+# -----------------------------------------------------------------------------
+
+resources:
+  repositories:
+    - repository: pipelines
+      type: git
+      # Adjust to the actual project/repo that holds the templates.
+      name: OperationalManagement/terraform-modules-pipelines
+      ref: refs/heads/main
+
+trigger:
+  branches:
+    include: [ main ]
+  paths:
+    include:
+      - '**/*.tf'
+      - 'tests/**'
+
+pool:
+  vmImage: ubuntu-latest
+
+stages:
+  - stage: Validate
+    displayName: 'Terraform module validation'
+    jobs:
+      - job: module_checks
+        displayName: 'Conformance / Security / Test'
+        steps:
+          - checkout: self
+
+          # Story 10379
+          - template: conformance-test.yml@pipelines
+            parameters:
+              modulePath: '$(Build.SourcesDirectory)'
+              failOnError: true
+
+          # Story 10380
+          - template: security-scan.yml@pipelines
+            parameters:
+              modulePath: '$(Build.SourcesDirectory)'
+              scanner: trivy          # or: checkov
+              failOnFindings: false
+
+          # Story 10382
+          - template: terraform-test.yml@pipelines
+            parameters:
+              modulePath: '$(Build.SourcesDirectory)'
+              testDirectory: tests
+
+# -----------------------------------------------------------------------------
+# extends: alternative
+#
+# If you prefer a single governed entry point, wrap the three step templates in
+# one pipeline-level template in the pipelines repo (e.g. module-ci.yml with a
+# top-level `stages:`/`steps:` body), then in the module repo:
+#
+#   resources:
+#     repositories:
+#       - repository: pipelines
+#         type: git
+#         name: OperationalManagement/terraform-modules-pipelines
+#   extends:
+#     template: module-ci.yml@pipelines
+#     parameters:
+#       scanner: trivy
+# -----------------------------------------------------------------------------

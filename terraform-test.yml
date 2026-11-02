@@ -1,0 +1,82 @@
+# terraform-test.yml
+# -----------------------------------------------------------------------------
+# Story 10382 - Terraform Test Runner
+#
+# Reusable Azure Pipelines STEP template that runs `terraform test` against a
+# module's tests/*.tftest.hcl files, so each module can define its own test
+# cases while sharing this common pipeline.
+#
+# Anything that can't be expressed as a .tftest.hcl should be exercised in the
+# module's own azure-pipelines.yml.
+# -----------------------------------------------------------------------------
+
+parameters:
+  - name: modulePath
+    type: string
+    default: '$(Build.SourcesDirectory)'
+  # Directory (relative to modulePath) holding the *.tftest.hcl files.
+  - name: testDirectory
+    type: string
+    default: 'tests'
+  - name: terraformVersion
+    type: string
+    default: '1.9.8'
+  # Behaviour when no *.tftest.hcl files are found: 'skip' (succeed) or 'fail'.
+  - name: whenNoTests
+    type: string
+    default: 'skip'
+    values:
+      - skip
+      - fail
+  # init args - backend disabled by default so module tests don't need remote state.
+  - name: initArgs
+    type: string
+    default: '-input=false -backend=false'
+
+steps:
+  # Self-contained Terraform install (no marketplace extension required).
+  # If your org already has the 'TerraformInstaller@1' task, you can swap this
+  # step for it instead.
+  - bash: |
+      set -euo pipefail
+      TF_VERSION="${{ parameters.terraformVersion }}"
+      INSTALL_DIR="$(Agent.TempDirectory)/tf-bin"
+      mkdir -p "${INSTALL_DIR}"
+      echo "Installing Terraform ${TF_VERSION}..."
+      curl -sfLo "$(Agent.TempDirectory)/terraform.zip" \
+        "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip"
+      unzip -o -q "$(Agent.TempDirectory)/terraform.zip" -d "${INSTALL_DIR}"
+      echo "##vso[task.prependpath]${INSTALL_DIR}"
+      "${INSTALL_DIR}/terraform" version
+    displayName: 'Install Terraform ${{ parameters.terraformVersion }}'
+
+  - bash: |
+      set -uo pipefail
+      MODULE_PATH="${{ parameters.modulePath }}"
+      TEST_DIR="${{ parameters.testDirectory }}"
+      WHEN_NO_TESTS="${{ parameters.whenNoTests }}"
+
+      cd "${MODULE_PATH}"
+
+      shopt -s nullglob
+      tests=( "${TEST_DIR}"/*.tftest.hcl )
+      shopt -u nullglob
+
+      if [[ ${#tests[@]} -eq 0 ]]; then
+        echo "No *.tftest.hcl files found under ${MODULE_PATH}/${TEST_DIR}"
+        if [[ "${WHEN_NO_TESTS}" == "fail" ]]; then
+          exit 1
+        fi
+        echo "##vso[task.complete result=SucceededWithIssues;]No terraform tests found."
+        exit 0
+      fi
+
+      echo "Found ${#tests[@]} test file(s):"
+      printf '  %s\n' "${tests[@]}"
+
+      echo "terraform init..."
+      terraform init ${{ parameters.initArgs }}
+
+      echo "terraform test..."
+      terraform test -test-directory="${TEST_DIR}" -verbose
+    displayName: 'terraform test'

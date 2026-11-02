@@ -1,0 +1,123 @@
+# security-scan.yml
+# -----------------------------------------------------------------------------
+# Story 10380 - Security Misconfiguration Scanner
+#
+# Reusable Azure Pipelines STEP template that runs checkov OR trivy against a
+# module and surfaces security concerns, publishing a report artifact.
+#
+# Scope (per the story): just run the scanner and report. Baseline tuning and
+# advanced scanner config management are out of scope and handled by follow-up
+# stories. failOnFindings therefore defaults to false - the MVP reports concerns
+# without blocking the build.
+# -----------------------------------------------------------------------------
+
+parameters:
+  - name: modulePath
+    type: string
+    default: '$(Build.SourcesDirectory)'
+  # Which scanner to run.
+  - name: scanner
+    type: string
+    default: 'trivy'
+    values:
+      - trivy
+      - checkov
+  # false -> report findings but succeed (default for the MVP).
+  # true  -> HIGH/CRITICAL findings fail the pipeline.
+  - name: failOnFindings
+    type: boolean
+    default: false
+  # Pin tool versions for reproducibility ('latest' to always pull newest).
+  - name: trivyVersion
+    type: string
+    default: '0.58.0'
+  - name: checkovVersion
+    type: string
+    default: 'latest'
+
+steps:
+  # ----------------------------- trivy -----------------------------------------
+  - ${{ if eq(parameters.scanner, 'trivy') }}:
+      - bash: |
+          set -euo pipefail
+          VERSION="${{ parameters.trivyVersion }}"
+          INSTALL_DIR="$(Agent.TempDirectory)/trivy-bin"
+          mkdir -p "${INSTALL_DIR}"
+          echo "Installing trivy ${VERSION}..."
+          if [[ "${VERSION}" == "latest" ]]; then
+            curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b "${INSTALL_DIR}"
+          else
+            curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b "${INSTALL_DIR}" "v${VERSION}"
+          fi
+          echo "##vso[task.prependpath]${INSTALL_DIR}"
+          "${INSTALL_DIR}/trivy" --version
+        displayName: 'Install trivy'
+
+      - bash: |
+          set -uo pipefail
+          MODULE_PATH="${{ parameters.modulePath }}"
+          FAIL="$(echo "${{ parameters.failOnFindings }}" | tr 'A-Z' 'a-z')"
+          REPORT_DIR="$(Build.ArtifactStagingDirectory)"
+
+          echo "Scanning ${MODULE_PATH} with 'trivy config'..."
+
+          # Human-readable table to the log.
+          EXIT_CODE=0
+          if [[ "${FAIL}" == "true" ]]; then
+            trivy config --severity HIGH,CRITICAL --exit-code 1 "${MODULE_PATH}" || EXIT_CODE=$?
+          else
+            trivy config --exit-code 0 "${MODULE_PATH}" || EXIT_CODE=$?
+          fi
+
+          # Machine-readable report artifact (never blocks on its own).
+          trivy config --format json --output "${REPORT_DIR}/trivy-report.json" "${MODULE_PATH}" || true
+
+          exit ${EXIT_CODE}
+        displayName: 'Run trivy config scan'
+
+  # ----------------------------- checkov ---------------------------------------
+  - ${{ if eq(parameters.scanner, 'checkov') }}:
+      - task: UsePythonVersion@0
+        inputs:
+          versionSpec: '3.x'
+        displayName: 'Use Python 3'
+
+      - bash: |
+          set -euo pipefail
+          VERSION="${{ parameters.checkovVersion }}"
+          if [[ "${VERSION}" == "latest" ]]; then
+            pip install --quiet --upgrade checkov
+          else
+            pip install --quiet "checkov==${VERSION}"
+          fi
+          checkov --version
+        displayName: 'Install checkov'
+
+      - bash: |
+          set -uo pipefail
+          MODULE_PATH="${{ parameters.modulePath }}"
+          FAIL="$(echo "${{ parameters.failOnFindings }}" | tr 'A-Z' 'a-z')"
+          REPORT_DIR="$(Build.ArtifactStagingDirectory)"
+
+          SOFT_FAIL="--soft-fail"
+          [[ "${FAIL}" == "true" ]] && SOFT_FAIL=""
+
+          echo "Scanning ${MODULE_PATH} with checkov..."
+          checkov \
+            --directory "${MODULE_PATH}" \
+            --framework terraform \
+            --download-external-modules false \
+            --compact \
+            ${SOFT_FAIL} \
+            --output cli \
+            --output junitxml \
+            --output-file-path "console,${REPORT_DIR}/checkov-junit.xml"
+        displayName: 'Run checkov scan'
+
+  # --------------------------- publish report ----------------------------------
+  - task: PublishBuildArtifacts@1
+    condition: always()
+    inputs:
+      PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+      ArtifactName: 'security-scan-report'
+    displayName: 'Publish security scan report'
